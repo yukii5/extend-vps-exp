@@ -26,4 +26,8 @@ jobs:
           TURNSTILE_SOLVER_TIMEOUT_MS: ${{ vars.TURNSTILE_SOLVER_TIMEOUT_MS }}
       - uses: actions/upload-artifact@v4
         with:
-          path: recording.webm
+          if-no-files-found: ignore
+          path: |
+            recording.webm
+            debug-*.png
+            debug-*.html
