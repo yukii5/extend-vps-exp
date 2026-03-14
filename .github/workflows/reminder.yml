@@ -18,6 +18,15 @@ jobs:
           EMAIL: ${{ secrets.EMAIL }}
           PASSWORD: ${{ secrets.PASSWORD }}
           PROXY_SERVER: ${{ secrets.PROXY_SERVER }}
+          TURNSTILE_SOLVER_PROVIDER: ${{ vars.TURNSTILE_SOLVER_PROVIDER }}
+          TURNSTILE_SOLVER_API_KEY: ${{ secrets.TURNSTILE_SOLVER_API_KEY }}
+          TWOCAPTCHA_API_KEY: ${{ secrets.TWOCAPTCHA_API_KEY }}
+          TURNSTILE_TIMEOUT_MS: ${{ vars.TURNSTILE_TIMEOUT_MS }}
+          TURNSTILE_SOLVER_TIMEOUT_MS: ${{ vars.TURNSTILE_SOLVER_TIMEOUT_MS }}
       - uses: actions/upload-artifact@v4
         with:
-          path: recording.webm
+          if-no-files-found: ignore
+          path: |
+            recording.webm
+            debug-*.png
+            debug-*.html
