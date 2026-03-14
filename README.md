@@ -18,7 +18,13 @@ https://secure.xserver.ne.jp/xapanel/login/xvps/
 EMAIL=your@gmail.com
 PASSWORD=yourpassword
 PROXY_SERVER=http://user:password@example.com:8888
+TURNSTILE_SOLVER_PROVIDER=2captcha
+TURNSTILE_SOLVER_API_KEY=your_api_key
+TURNSTILE_TIMEOUT_MS=30000
+TURNSTILE_SOLVER_TIMEOUT_MS=120000
 ```
+
+`TURNSTILE_SOLVER_PROVIDER` は `2captcha` または `capsolver` を指定できます。Cloudflare Turnstile で止まる場合は `PROXY_SERVER` と同じ出口 IP で solver を使える `2captcha` が優先です。
 
 <details><summary>プロキシサーバーのインストール</summary>
 

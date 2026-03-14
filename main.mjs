@@ -281,7 +281,7 @@ async function ensureTurnstileReady(page) {
 
     try {
         await waitForTurnstileToken(page, turnstileTimeoutMs)
-    } catch (error) {
+    } catch {
         console.log('Turnstile token was still unavailable', await getTurnstileState(page))
         const token = await solveTurnstile(page)
         await applyTurnstileToken(page, token)
