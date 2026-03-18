@@ -395,28 +395,44 @@ async function clickContinueButton(page, reason) {
     }
 
     const submitMode = await page.evaluate((text, inputSelector) => {
-        if (typeof globalThis.submit_button !== 'undefined'
-            && globalThis.submit_button
-            && typeof globalThis.submit_button.click === 'function') {
-            globalThis.submit_button.click()
-            return 'global-submit-button'
-        }
-
         const candidates = Array.from(document.querySelectorAll('input[type="submit"], input[type="button"], button, a')) // submit 候補の DOM 一覧
         const target = candidates.find(node => (node.textContent ?? node.value ?? '').includes(text)) // 文言が一致する送信候補
-        if (target && typeof target.click === 'function') {
-            target.click()
-            return 'matched-node'
+        const globalSubmitButton = (
+            typeof globalThis.submit_button !== 'undefined'
+            && globalThis.submit_button
+        ) ? globalThis.submit_button : null // ページ側が持っているグローバル submit ボタン
+        const submitButton = globalSubmitButton ?? target ?? null // 最優先で使う submit 要素
+        const form = document.querySelector(inputSelector)?.closest('form') ?? submitButton?.closest('form') ?? document.querySelector('form') // 送信対象 form
+
+        if (submitButton) {
+            if ('disabled' in submitButton) {
+                submitButton.disabled = false
+            }
+            if (typeof submitButton.removeAttribute === 'function') {
+                submitButton.removeAttribute('disabled')
+                submitButton.removeAttribute('aria-disabled')
+            }
+            submitButton.classList?.remove('disabled', 'is-disabled')
         }
 
-        const form = document.querySelector(inputSelector)?.closest('form') ?? document.querySelector('form') // 最後に直接 submit を試す対象 form
+        const isSubmitControl = Boolean(
+            submitButton?.matches?.('button:not([type]), button[type="submit"], input[type="submit"], input[type="image"]')
+        ) // requestSubmit にそのまま渡せる submit control か
+        if (form?.requestSubmit && submitButton && isSubmitControl) {
+            form.requestSubmit(submitButton)
+            return globalSubmitButton ? 'request-submit-global-button' : 'request-submit-matched-button'
+        }
+        if (submitButton && typeof submitButton.click === 'function') {
+            submitButton.click()
+            return globalSubmitButton ? 'global-submit-button' : 'matched-node'
+        }
         if (form?.requestSubmit) {
             form.requestSubmit()
             return 'request-submit'
         }
-        if (form?.submit) {
-            form.submit()
-            return 'direct-submit'
+        if (form) {
+            HTMLFormElement.prototype.submit.call(form)
+            return 'native-form-submit'
         }
 
         return null
