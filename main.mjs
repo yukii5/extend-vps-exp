@@ -245,16 +245,20 @@ async function solveTurnstile(page) {
 async function applyTurnstileToken(page, token) {
     await page.evaluate((value) => {
         const setFieldValue = (selector, name) => {
-            let field = document.querySelector(selector)
-            if (!field) {
-                field = document.createElement('input')
+            const fields = Array.from(document.querySelectorAll(selector)) // 同名 field が複数あるケースもまとめて更新する対象一覧
+            if (fields.length === 0) {
+                const field = document.createElement('input')
                 field.type = 'hidden'
                 field.name = name
                 ;(document.querySelector('form') ?? document.body).appendChild(field)
+                fields.push(field)
             }
-            field.value = value
-            field.dispatchEvent(new Event('input', { bubbles: true }))
-            field.dispatchEvent(new Event('change', { bubbles: true }))
+
+            for (const field of fields) {
+                field.value = value
+                field.dispatchEvent(new Event('input', { bubbles: true }))
+                field.dispatchEvent(new Event('change', { bubbles: true }))
+            }
         } // 指定 input を作成または取得して token を流し込む helper
 
         setFieldValue('[name="cf-turnstile-response"]', 'cf-turnstile-response')
