@@ -258,6 +258,7 @@ async function applyTurnstileToken(page, token) {
         } // 指定 input を作成または取得して token を流し込む helper
 
         setFieldValue('[name="cf-turnstile-response"]', 'cf-turnstile-response')
+        setFieldValue('[name="cf_challenge_response"]', 'cf_challenge_response')
         setFieldValue('[name="g-recaptcha-response"]', 'g-recaptcha-response')
 
         if (typeof globalThis.__turnstileCallback === 'function') {
@@ -418,13 +419,16 @@ async function clickContinueButton(page, reason) {
         const isSubmitControl = Boolean(
             submitButton?.matches?.('button:not([type]), button[type="submit"], input[type="submit"], input[type="image"]')
         ) // requestSubmit にそのまま渡せる submit control か
+        if (submitButton && typeof submitButton.click === 'function') {
+            submitButton.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+            submitButton.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+            submitButton.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+            submitButton.click()
+            return globalSubmitButton ? 'global-submit-button' : 'matched-node'
+        }
         if (form?.requestSubmit && submitButton && isSubmitControl) {
             form.requestSubmit(submitButton)
             return globalSubmitButton ? 'request-submit-global-button' : 'request-submit-matched-button'
-        }
-        if (submitButton && typeof submitButton.click === 'function') {
-            submitButton.click()
-            return globalSubmitButton ? 'global-submit-button' : 'matched-node'
         }
         if (form?.requestSubmit) {
             form.requestSubmit()
