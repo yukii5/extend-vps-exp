@@ -307,21 +307,80 @@ async function ensureTurnstileReady(page) {
     }
 }
 
-// 送信や遷移のあとに URL や主要要素の変化が出るまで短時間待つ。
-async function waitForPotentialPageChange(page, previousUrl) {
+// 送信前後の比較に使うため、現在のページ状態をスナップショットとして保存する。
+async function getPageChangeSnapshot(page) {
+    return page.evaluate(({ imageSelector, inputSelector, turnstileSelector }) => {
+        const image = document.querySelector(imageSelector)
+        const input = document.querySelector(inputSelector)
+        const turnstileInput = document.querySelector(turnstileSelector)
+
+        return {
+            url: window.location.href,
+            title: document.title,
+            captchaSrc: image?.src ?? null,
+            captchaValue: input?.value ?? '',
+            turnstileValue: turnstileInput?.value ?? '',
+            bodySnippet: document.body?.innerText?.replace(/\s+/g, ' ').slice(0, 400) ?? '',
+        }
+    }, {
+        imageSelector: captchaImageSelector,
+        inputSelector: captchaInputSelector,
+        turnstileSelector: turnstileInputSelector,
+    })
+}
+
+// 送信後に POST や DOM 変化が起きたかを把握するための診断情報を収集する。
+async function getSubmitDiagnostics(page) {
+    return page.evaluate(({ inputSelector, turnstileSelector, buttonText }) => {
+        const input = document.querySelector(inputSelector)
+        const turnstileInput = document.querySelector(turnstileSelector)
+        const submitButton = Array.from(document.querySelectorAll('input[type="submit"], input[type="button"], button, a'))
+            .find(node => (node.textContent ?? node.value ?? '').includes(buttonText))
+        const form = input?.closest('form') ?? submitButton?.closest('form') ?? document.querySelector('form')
+        const messages = Array.from(document.querySelectorAll('.error, .alert, .warning, .notice, .message, .formError'))
+            .map(node => node.textContent?.trim())
+            .filter(Boolean)
+
+        return {
+            url: window.location.href,
+            title: document.title,
+            formAction: form?.action ?? null,
+            formMethod: form?.method ?? null,
+            captchaValue: input?.value ?? '',
+            turnstileTokenLength: turnstileInput?.value?.length ?? 0,
+            submitButtonDisabled: Boolean(submitButton?.disabled),
+            messages,
+            bodySnippet: document.body?.innerText?.replace(/\s+/g, ' ').slice(0, 600) ?? '',
+        }
+    }, {
+        inputSelector: captchaInputSelector,
+        turnstileSelector: turnstileInputSelector,
+        buttonText: continueButtonText,
+    })
+}
+
+// 送信や遷移のあとに、送信前スナップショットとの差分が出るまで短時間待つ。
+async function waitForPotentialPageChange(page, previousSnapshot, timeoutMs = 10000) {
     try {
-        await page.waitForFunction((url, imageSelector, inputSelector, turnstileSelector) => {
+        await page.waitForFunction((snapshot, imageSelector, inputSelector, turnstileSelector) => {
+            const image = document.querySelector(imageSelector)
+            const input = document.querySelector(inputSelector)
+            const turnstileInput = document.querySelector(turnstileSelector)
+            const bodySnippet = document.body?.innerText?.replace(/\s+/g, ' ').slice(0, 400) ?? ''
+
             return (
-                window.location.href !== url
-                || Boolean(document.querySelector(imageSelector))
-                || Boolean(document.querySelector(inputSelector))
-                || Boolean(document.querySelector('.cf-turnstile'))
-                || Boolean(document.querySelector('iframe[src*="challenges.cloudflare.com"]'))
-                || Boolean(document.querySelector(turnstileSelector))
+                window.location.href !== snapshot.url
+                || document.title !== snapshot.title
+                || (image?.src ?? null) !== snapshot.captchaSrc
+                || (input?.value ?? '') !== snapshot.captchaValue
+                || (turnstileInput?.value ?? '') !== snapshot.turnstileValue
+                || bodySnippet !== snapshot.bodySnippet
             )
-        }, { timeout: 10000 }, previousUrl, captchaImageSelector, captchaInputSelector, turnstileInputSelector)
+        }, { timeout: timeoutMs }, previousSnapshot, captchaImageSelector, captchaInputSelector, turnstileInputSelector)
+        return true
     } catch {
         // Let the next state check decide whether we progressed.
+        return false
     }
 }
 
@@ -427,17 +486,17 @@ async function waitForRenewalCaptcha(page) {
         if (state.hasTurnstile) {
             await ensureTurnstileReady(page)
             if (!state.hasCaptchaImage && state.hasContinueButton) {
-                const previousUrl = page.url() // 送信前の URL
+                const previousSnapshot = await getPageChangeSnapshot(page) // 送信前のページ状態
                 await clickContinueButton(page, 'advance after Turnstile')
-                await waitForPotentialPageChange(page, previousUrl)
+                await waitForPotentialPageChange(page, previousSnapshot)
                 continue
             }
         }
 
         if (state.hasContinueButton && !state.hasCaptchaImage) {
-            const previousUrl = page.url() // 再送信前の URL
+            const previousSnapshot = await getPageChangeSnapshot(page) // 再送信前のページ状態
             await clickContinueButton(page, 'retry until CAPTCHA image is visible')
-            await waitForPotentialPageChange(page, previousUrl)
+            await waitForPotentialPageChange(page, previousSnapshot)
             continue
         }
 
@@ -529,12 +588,29 @@ try {
         headers: { 'content-type': 'text/plain' },
     }).then(response => response.text()) // 外部 API が返した CAPTCHA 認識結果
 
+    console.log('Captcha recognition result', code.trim())
     await page.locator(captchaInputSelector).fill(code.trim())
     await ensureTurnstileReady(page)
-    const previousUrl = page.url() // 最終 submit 前の URL
+    const previousSnapshot = await getPageChangeSnapshot(page) // 最終 submit 前のページ状態
+    const navigationPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).then(() => ({
+        happened: true,
+        url: page.url(),
+    })).catch(() => null)
+    const requestPromise = page.waitForRequest(request => (
+        request.method() === 'POST'
+        && request.url().includes('/xapanel/xvps/server/freevps/extend/')
+    ), { timeout: 15000 }).then(request => ({
+        happened: true,
+        url: request.url(),
+        method: request.method(),
+    })).catch(() => null)
     await clickContinueButton(page, 'submit renewal form')
-    await waitForPotentialPageChange(page, previousUrl)
+    const pageChanged = await waitForPotentialPageChange(page, previousSnapshot, 15000)
+    const submitRequest = await requestPromise
+    const navigationResult = await navigationPromise
+    console.log('Submit observation', { pageChanged, submitRequest, navigationResult })
     console.log('Post-submit state', await getRenewalPageState(page))
+    console.log('Post-submit diagnostics', await getSubmitDiagnostics(page))
 } catch (error) {
     await saveDebugArtifacts(page, 'main-error')
     console.error(error)
