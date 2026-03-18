@@ -13,6 +13,7 @@ const turnstileTimeoutMs = Number.isFinite(parsedTurnstileTimeoutMs) ? parsedTur
 const parsedTurnstileSolverTimeoutMs = Number.parseInt(process.env.TURNSTILE_SOLVER_TIMEOUT_MS ?? '120000', 10) // 環境変数から読んだ solver 待機時間の生値
 const turnstileSolverTimeoutMs = Number.isFinite(parsedTurnstileSolverTimeoutMs) ? parsedTurnstileSolverTimeoutMs : 120000 // solver から token が返るまで待つ実際のタイムアウト値
 const turnstileSolverProvider = (process.env.TURNSTILE_SOLVER_PROVIDER || '2captcha').trim().toLowerCase() // 使う Turnstile solver の種別
+const defaultBrowserUserAgent = process.env.BROWSER_USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36' // 2Captcha と揃えやすい固定の送信用 User-Agent
 const turnstileSolverApiKey = (
     process.env.TURNSTILE_SOLVER_API_KEY
     ?? process.env.TWOCAPTCHA_API_KEY
@@ -228,7 +229,10 @@ async function solveTurnstile(page) {
                 solveCount: result.solveCount,
                 userAgent: result.solution.userAgent ?? null,
             })
-            return result.solution.token
+            return {
+                token: result.solution.token,
+                userAgent: result.solution.userAgent ?? state.userAgent,
+            }
         }
 
         throw new Error(`2Captcha returned unexpected status: ${JSON.stringify(result)}`)
@@ -293,8 +297,12 @@ async function ensureTurnstileReady(page) {
         await waitForTurnstileToken(page, turnstileTimeoutMs)
     } catch {
         console.log('Turnstile token was still unavailable', await getTurnstileState(page))
-        const token = await solveTurnstile(page) // solver が返した token
-        await applyTurnstileToken(page, token)
+        const solution = await solveTurnstile(page) // solver が返した token と UA
+        if (solution.userAgent) {
+            await page.setUserAgent(solution.userAgent)
+            console.log('Updated browser user agent to solver value', solution.userAgent)
+        }
+        await applyTurnstileToken(page, solution.token)
         console.log('Injected Turnstile token from solver')
     }
 }
@@ -445,8 +453,7 @@ const browser = await puppeteer.launch({
     args,
 }) // 自動操作に使う Chromium ブラウザ
 const [page] = await browser.pages() // 最初のタブ
-const userAgent = await browser.userAgent() // ブラウザが返す元の User-Agent
-await page.setUserAgent(userAgent.replace('Headless', ''))
+await page.setUserAgent(defaultBrowserUserAgent)
 await page.setExtraHTTPHeaders({ 'accept-language': 'ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7' })
 await page.evaluateOnNewDocument(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
