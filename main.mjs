@@ -527,11 +527,70 @@ async function waitForRenewalCaptcha(page) {
     throw new Error(`Verification page did not expose the CAPTCHA image: ${JSON.stringify(await getRenewalPageState(page))}`)
 }
 
+// 更新送信の POST かどうかを URL と method から判定する。
+function isRenewalSubmitRequest(request) {
+    return request.method() === 'POST' && request.url().includes('/xapanel/xvps/server/freevps/extend/')
+}
+
+// 送信 body をログ用に要約して、どの入力が実際に飛んだかを確認しやすくする。
+function summarizePostData(postData) {
+    if (!postData) {
+        return null
+    }
+
+    const params = new URLSearchParams(postData) // application/x-www-form-urlencoded の POST body
+    const entries = {}
+    for (const [key, value] of params.entries()) {
+        entries[key] = {
+            length: value.length,
+            preview: value.length > 24 ? `${value.slice(0, 12)}...${value.slice(-6)}` : value,
+        }
+    }
+
+    return {
+        keys: Object.keys(entries),
+        values: entries,
+    }
+}
+
 const browser = await puppeteer.launch({
     defaultViewport: { width: 1080, height: 1024 },
     args,
 }) // 自動操作に使う Chromium ブラウザ
 const [page] = await browser.pages() // 最初のタブ
+const submitTrace = {
+    request: null,
+    response: null,
+} // 更新送信 request/response の観測結果
+page.on('request', request => {
+    if (!isRenewalSubmitRequest(request)) {
+        return
+    }
+
+    submitTrace.request = {
+        url: request.url(),
+        method: request.method(),
+        headers: {
+            'content-type': request.headers()['content-type'] ?? null,
+        },
+        postData: summarizePostData(request.postData()),
+    }
+})
+page.on('response', response => {
+    const request = response.request()
+    if (!isRenewalSubmitRequest(request)) {
+        return
+    }
+
+    submitTrace.response = {
+        url: response.url(),
+        status: response.status(),
+        headers: {
+            location: response.headers().location ?? null,
+            'content-type': response.headers()['content-type'] ?? null,
+        },
+    }
+})
 await page.setUserAgent(defaultBrowserUserAgent)
 await page.setExtraHTTPHeaders({ 'accept-language': 'ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7' })
 await page.evaluateOnNewDocument(() => {
@@ -539,6 +598,53 @@ await page.evaluateOnNewDocument(() => {
     Object.defineProperty(navigator, 'language', { get: () => 'ja-JP' })
     Object.defineProperty(navigator, 'languages', { get: () => ['ja-JP', 'ja', 'en-US', 'en'] })
     Object.defineProperty(navigator, 'platform', { get: () => 'Win32' })
+
+    // submit 時点の form data を sessionStorage に残し、遷移後にも確認できるようにする。
+    const persistSubmitPayload = (form, submitter = null) => {
+        try {
+            const formData = submitter ? new FormData(form, submitter) : new FormData(form) // submit 時点の送信 payload
+            const entries = Array.from(formData.entries()).map(([name, rawValue]) => {
+                const value = typeof rawValue === 'string' ? rawValue : `[binary:${rawValue.name ?? 'blob'}]`
+                return {
+                    name,
+                    length: value.length,
+                    preview: value.length > 24 ? `${value.slice(0, 12)}...${value.slice(-6)}` : value,
+                }
+            })
+
+            sessionStorage.setItem('__codexLastSubmitPayload', JSON.stringify({
+                action: form.action,
+                method: form.method,
+                submitterText: submitter ? (submitter.textContent ?? submitter.value ?? submitter.name ?? submitter.id ?? submitter.tagName) : null,
+                entries,
+            }))
+        } catch (error) {
+            sessionStorage.setItem('__codexLastSubmitPayload', JSON.stringify({
+                error: String(error),
+            }))
+        }
+    }
+
+    document.addEventListener('submit', event => {
+        if (!(event.target instanceof HTMLFormElement)) {
+            return
+        }
+        persistSubmitPayload(event.target, event.submitter ?? document.activeElement)
+    }, true)
+
+    const originalSubmit = HTMLFormElement.prototype.submit // 元の form.submit
+    HTMLFormElement.prototype.submit = function submitWithTrace(...args) {
+        persistSubmitPayload(this, document.activeElement)
+        return originalSubmit.apply(this, args)
+    }
+
+    const originalRequestSubmit = HTMLFormElement.prototype.requestSubmit // 元の form.requestSubmit
+    if (typeof originalRequestSubmit === 'function') {
+        HTMLFormElement.prototype.requestSubmit = function requestSubmitWithTrace(submitter) {
+            persistSubmitPayload(this, submitter ?? document.activeElement)
+            return originalRequestSubmit.call(this, submitter)
+        }
+    }
 
     // Turnstile の render 引数を横取りして sitekey や callback を保持する。
     const installTurnstileHook = () => {
@@ -611,6 +717,7 @@ try {
     console.log('Captcha recognition result', code.trim())
     await page.locator(captchaInputSelector).fill(code.trim())
     await ensureTurnstileReady(page)
+    await page.evaluate(() => sessionStorage.removeItem('__codexLastSubmitPayload'))
     const previousSnapshot = await getPageChangeSnapshot(page) // 最終 submit 前のページ状態
     const navigationPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).then(() => ({
         happened: true,
@@ -628,7 +735,18 @@ try {
     const pageChanged = await waitForPotentialPageChange(page, previousSnapshot, 15000)
     const submitRequest = await requestPromise
     const navigationResult = await navigationPromise
-    console.log('Submit observation', { pageChanged, submitRequest, navigationResult })
+    const lastSubmitPayload = await page.evaluate(() => {
+        const raw = sessionStorage.getItem('__codexLastSubmitPayload')
+        return raw ? JSON.parse(raw) : null
+    })
+    console.log('Submit observation', {
+        pageChanged,
+        submitRequest,
+        trackedRequest: submitTrace.request,
+        trackedResponse: submitTrace.response,
+        navigationResult,
+        lastSubmitPayload,
+    })
     console.log('Post-submit state', await getRenewalPageState(page))
     console.log('Post-submit diagnostics', await getSubmitDiagnostics(page))
 } catch (error) {
