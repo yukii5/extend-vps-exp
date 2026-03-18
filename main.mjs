@@ -553,6 +553,11 @@ function summarizePostData(postData) {
     }
 }
 
+// GitHub Actions のログでオブジェクトが潰れないように JSON 文字列で出力する。
+function logJson(label, value) {
+    console.log(`${label} ${JSON.stringify(value, null, 2)}`)
+}
+
 const browser = await puppeteer.launch({
     defaultViewport: { width: 1080, height: 1024 },
     args,
@@ -739,7 +744,7 @@ try {
         const raw = sessionStorage.getItem('__codexLastSubmitPayload')
         return raw ? JSON.parse(raw) : null
     })
-    console.log('Submit observation', {
+    logJson('Submit observation', {
         pageChanged,
         submitRequest,
         trackedRequest: submitTrace.request,
@@ -747,8 +752,8 @@ try {
         navigationResult,
         lastSubmitPayload,
     })
-    console.log('Post-submit state', await getRenewalPageState(page))
-    console.log('Post-submit diagnostics', await getSubmitDiagnostics(page))
+    logJson('Post-submit state', await getRenewalPageState(page))
+    logJson('Post-submit diagnostics', await getSubmitDiagnostics(page))
 } catch (error) {
     await saveDebugArtifacts(page, 'main-error')
     console.error(error)
