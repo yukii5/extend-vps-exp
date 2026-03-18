@@ -245,9 +245,9 @@ async function solveTurnstile(page) {
 // 取得した Turnstile token を hidden input と callback に注入する。
 async function applyTurnstileToken(page, token) {
     await page.evaluate((value) => {
-        const setFieldValue = (selector, name) => {
+        const setFieldValue = (selector, name, { createIfMissing = false } = {}) => {
             const fields = Array.from(document.querySelectorAll(selector)) // 同名 field が複数あるケースもまとめて更新する対象一覧
-            if (fields.length === 0) {
+            if (fields.length === 0 && createIfMissing) {
                 const field = document.createElement('input')
                 field.type = 'hidden'
                 field.name = name
@@ -262,7 +262,7 @@ async function applyTurnstileToken(page, token) {
             }
         } // 指定 input を作成または取得して token を流し込む helper
 
-        setFieldValue('[name="cf-turnstile-response"]', 'cf-turnstile-response')
+        setFieldValue('[name="cf-turnstile-response"]', 'cf-turnstile-response', { createIfMissing: true })
         setFieldValue('[name="cf_challenge_response"]', 'cf_challenge_response')
         setFieldValue('[name="g-recaptcha-response"]', 'g-recaptcha-response')
 
