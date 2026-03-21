@@ -518,6 +518,38 @@ async function applyCaptchaCode(page, code) {
     await page.locator(captchaInputSelector).fill(code)
 }
 
+// Ethna の CSRF hidden field が空なら、同名 cookie の値で埋められるか試す。
+async function syncEthnaCsrf(page) {
+    return page.evaluate(() => {
+        const fields = Array.from(document.querySelectorAll('[name="ethna_csrf"]')) // Ethna CSRF hidden input 群
+        const cookieValue = document.cookie
+            .split('; ')
+            .find(entry => entry.startsWith('ethna_csrf='))
+            ?.slice('ethna_csrf='.length) ?? '' // JS から参照できる ethna_csrf cookie 値
+
+        if (cookieValue) {
+            for (const field of fields) {
+                if (!(field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement)) {
+                    continue
+                }
+                field.value = decodeURIComponent(cookieValue)
+                field.dispatchEvent(new Event('input', { bubbles: true }))
+                field.dispatchEvent(new Event('change', { bubbles: true }))
+            }
+        }
+
+        return {
+            fieldCount: fields.length,
+            fieldLengths: fields.map(field => ('value' in field ? String(field.value ?? '').length : 0)),
+            cookieLength: cookieValue.length,
+            cookieNames: document.cookie
+                .split('; ')
+                .filter(Boolean)
+                .map(entry => entry.split('=')[0]),
+        }
+    })
+}
+
 // 更新ページで画像 CAPTCHA が出るまで、Turnstile 解決や再送信を挟みながら待つ。
 async function waitForRenewalCaptcha(page) {
     for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -747,6 +779,7 @@ try {
     console.log('Captcha recognition result', code.trim())
     await applyCaptchaCode(page, code.trim())
     await ensureTurnstileReady(page)
+    logJson('Ethna csrf state', await syncEthnaCsrf(page))
     await page.evaluate(() => sessionStorage.removeItem('__codexLastSubmitPayload'))
     const previousSnapshot = await getPageChangeSnapshot(page) // 最終 submit 前のページ状態
     const navigationPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).then(() => ({
