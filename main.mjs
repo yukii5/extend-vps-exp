@@ -365,6 +365,85 @@ async function getSubmitDiagnostics(page) {
     })
 }
 
+// 送信前後の詳細確認用に、認証関連 field と form の状態を広めに収集する。
+async function getVerificationDiagnostics(page) {
+    return page.evaluate(({ captchaSelector, authSelector, turnstileSelector, buttonText }) => {
+        const previewValue = (value) => {
+            const text = String(value ?? '')
+            return text.length > 24 ? `${text.slice(0, 12)}...${text.slice(-6)}` : text
+        } // ログを見やすくするための短縮表示
+        const summarizeField = (field) => ({
+            tagName: field.tagName,
+            type: 'type' in field ? field.type ?? null : null,
+            name: 'name' in field ? field.name ?? null : null,
+            id: field.id ?? null,
+            disabled: 'disabled' in field ? Boolean(field.disabled) : null,
+            hidden: field instanceof HTMLElement ? field.hidden : null,
+            valueLength: 'value' in field ? String(field.value ?? '').length : 0,
+            valuePreview: 'value' in field ? previewValue(field.value) : null,
+        }) // 各 input 要素の要約
+
+        const captchaFields = Array.from(document.querySelectorAll(captchaSelector))
+        const authCodeFields = Array.from(document.querySelectorAll(authSelector))
+        const turnstileFields = Array.from(document.querySelectorAll('[name="cf-turnstile-response"]'))
+        const cfChallengeFields = Array.from(document.querySelectorAll('[name="cf_challenge_response"]'))
+        const grecaptchaFields = Array.from(document.querySelectorAll('[name="g-recaptcha-response"]'))
+        const csrfFields = Array.from(document.querySelectorAll('[name="ethna_csrf"]'))
+        const submitButton = (
+            typeof globalThis.submit_button !== 'undefined'
+            && globalThis.submit_button
+        ) ? globalThis.submit_button : Array.from(document.querySelectorAll('input[type="submit"], input[type="button"], button, a'))
+            .find(node => (node.textContent ?? node.value ?? '').includes(buttonText))
+        const form = captchaFields[0]?.closest('form') ?? authCodeFields[0]?.closest('form') ?? submitButton?.closest?.('form') ?? document.querySelector('form')
+        const formFields = form ? Array.from(form.elements).map((field) => ({
+            tagName: field.tagName,
+            type: 'type' in field ? field.type ?? null : null,
+            name: 'name' in field ? field.name ?? null : null,
+            id: field.id ?? null,
+            disabled: 'disabled' in field ? Boolean(field.disabled) : null,
+            valueLength: 'value' in field ? String(field.value ?? '').length : 0,
+            valuePreview: 'value' in field ? previewValue(field.value) : null,
+        })) : []
+
+        return {
+            url: window.location.href,
+            title: document.title,
+            cookieNames: document.cookie
+                .split('; ')
+                .filter(Boolean)
+                .map(entry => entry.split('=')[0]),
+            captchaFields: captchaFields.map(summarizeField),
+            authCodeFields: authCodeFields.map(summarizeField),
+            turnstileFields: turnstileFields.map(summarizeField),
+            cfChallengeFields: cfChallengeFields.map(summarizeField),
+            grecaptchaFields: grecaptchaFields.map(summarizeField),
+            csrfFields: csrfFields.map(summarizeField),
+            submitButton: submitButton ? {
+                tagName: submitButton.tagName ?? null,
+                type: 'type' in submitButton ? submitButton.type ?? null : null,
+                name: 'name' in submitButton ? submitButton.name ?? null : null,
+                id: submitButton.id ?? null,
+                disabled: 'disabled' in submitButton ? Boolean(submitButton.disabled) : null,
+                text: submitButton.textContent?.trim() ?? submitButton.value ?? null,
+                className: submitButton.className ?? null,
+                hasOnclick: typeof submitButton.onclick === 'function',
+            } : null,
+            form: form ? {
+                action: form.action ?? null,
+                method: form.method ?? null,
+                elementCount: form.elements.length,
+                fieldNames: formFields.map(field => field.name).filter(Boolean),
+                fields: formFields,
+            } : null,
+        }
+    }, {
+        captchaSelector: captchaInputSelector,
+        authSelector: authCodeSelector,
+        turnstileSelector: turnstileInputSelector,
+        buttonText: continueButtonText,
+    })
+}
+
 // 送信や遷移のあとに、送信前スナップショットとの差分が出るまで短時間待つ。
 async function waitForPotentialPageChange(page, previousSnapshot, timeoutMs = 10000) {
     try {
@@ -623,8 +702,20 @@ const [page] = await browser.pages() // 最初のタブ
 const submitTrace = {
     request: null,
     response: null,
+    events: [],
 } // 更新送信 request/response の観測結果
 page.on('request', request => {
+    if (!request.url().includes('/xapanel/xvps/server/freevps/extend/')) {
+        return
+    }
+
+    submitTrace.events.push({
+        type: 'request',
+        url: request.url(),
+        method: request.method(),
+        resourceType: request.resourceType(),
+    })
+
     if (!isRenewalSubmitRequest(request)) {
         return
     }
@@ -640,6 +731,18 @@ page.on('request', request => {
 })
 page.on('response', response => {
     const request = response.request()
+    if (!request.url().includes('/xapanel/xvps/server/freevps/extend/')) {
+        return
+    }
+
+    submitTrace.events.push({
+        type: 'response',
+        url: response.url(),
+        method: request.method(),
+        status: response.status(),
+        resourceType: request.resourceType(),
+    })
+
     if (!isRenewalSubmitRequest(request)) {
         return
     }
@@ -652,6 +755,29 @@ page.on('response', response => {
             'content-type': response.headers()['content-type'] ?? null,
         },
     }
+})
+page.on('requestfailed', request => {
+    if (!request.url().includes('/xapanel/xvps/server/freevps/extend/')) {
+        return
+    }
+
+    submitTrace.events.push({
+        type: 'requestfailed',
+        url: request.url(),
+        method: request.method(),
+        resourceType: request.resourceType(),
+        failureText: request.failure()?.errorText ?? null,
+    })
+})
+page.on('console', message => {
+    if (!['warning', 'error'].includes(message.type())) {
+        return
+    }
+
+    console.log(`Page console ${message.type()}`, message.text())
+})
+page.on('pageerror', error => {
+    console.log('Page error', error.message)
 })
 await page.setUserAgent(defaultBrowserUserAgent)
 await page.setExtraHTTPHeaders({ 'accept-language': 'ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7' })
@@ -778,8 +904,11 @@ try {
 
     console.log('Captcha recognition result', code.trim())
     await applyCaptchaCode(page, code.trim())
+    logJson('Verification diagnostics after captcha fill', await getVerificationDiagnostics(page))
     await ensureTurnstileReady(page)
+    logJson('Verification diagnostics after Turnstile', await getVerificationDiagnostics(page))
     logJson('Ethna csrf state', await syncEthnaCsrf(page))
+    logJson('Verification diagnostics before submit', await getVerificationDiagnostics(page))
     await page.evaluate(() => sessionStorage.removeItem('__codexLastSubmitPayload'))
     const previousSnapshot = await getPageChangeSnapshot(page) // 最終 submit 前のページ状態
     const navigationPromise = page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 }).then(() => ({
@@ -807,11 +936,13 @@ try {
         submitRequest,
         trackedRequest: submitTrace.request,
         trackedResponse: submitTrace.response,
+        networkEvents: submitTrace.events,
         navigationResult,
         lastSubmitPayload,
     })
     logJson('Post-submit state', await getRenewalPageState(page))
     logJson('Post-submit diagnostics', await getSubmitDiagnostics(page))
+    logJson('Verification diagnostics after submit', await getVerificationDiagnostics(page))
 } catch (error) {
     await saveDebugArtifacts(page, 'main-error')
     console.error(error)
