@@ -9,9 +9,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v4
-      - run: sudo apt-get -qq update && sudo apt-get -yqq install --no-install-recommends ffmpeg fonts-noto-cjk
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Install system packages
+        run: |
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Use-Pty=0 -o Dpkg::Progress-Fancy=0 -o APT::Color=0 -qq update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Use-Pty=0 -o Dpkg::Progress-Fancy=0 -o APT::Color=0 -yqq install --no-install-recommends ffmpeg fonts-noto-cjk
       - run: yarn add puppeteer
       - run: node reminder.mjs
         env:
@@ -24,7 +29,7 @@ jobs:
           CAPSOLVER_API_KEY: ${{ secrets.CAPSOLVER_API_KEY }}
           TURNSTILE_TIMEOUT_MS: ${{ vars.TURNSTILE_TIMEOUT_MS }}
           TURNSTILE_SOLVER_TIMEOUT_MS: ${{ vars.TURNSTILE_SOLVER_TIMEOUT_MS }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           if-no-files-found: ignore
           path: |
