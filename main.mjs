@@ -257,6 +257,12 @@ async function applyTurnstileToken(page, token) {
 
             for (const field of fields) {
                 field.value = value
+                if ('defaultValue' in field) {
+                    field.defaultValue = value
+                }
+                if (typeof field.setAttribute === 'function') {
+                    field.setAttribute('value', value)
+                }
                 field.dispatchEvent(new Event('input', { bubbles: true }))
                 field.dispatchEvent(new Event('change', { bubbles: true }))
             }
@@ -381,6 +387,8 @@ async function getVerificationDiagnostics(page) {
             hidden: field instanceof HTMLElement ? field.hidden : null,
             valueLength: 'value' in field ? String(field.value ?? '').length : 0,
             valuePreview: 'value' in field ? previewValue(field.value) : null,
+            attributeValueLength: typeof field.getAttribute === 'function' ? String(field.getAttribute('value') ?? '').length : 0,
+            attributeValuePreview: typeof field.getAttribute === 'function' ? previewValue(field.getAttribute('value') ?? '') : null,
         }) // 各 input 要素の要約
 
         const captchaFields = Array.from(document.querySelectorAll(captchaSelector))
@@ -586,6 +594,8 @@ async function applyCaptchaCode(page, code) {
                 continue
             }
             field.value = value
+            field.defaultValue = value
+            field.setAttribute('value', value)
             field.dispatchEvent(new Event('input', { bubbles: true }))
             field.dispatchEvent(new Event('change', { bubbles: true }))
         }
@@ -611,7 +621,10 @@ async function syncEthnaCsrf(page) {
                 if (!(field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement)) {
                     continue
                 }
-                field.value = decodeURIComponent(cookieValue)
+                const decodedValue = decodeURIComponent(cookieValue)
+                field.value = decodedValue
+                field.defaultValue = decodedValue
+                field.setAttribute('value', decodedValue)
                 field.dispatchEvent(new Event('input', { bubbles: true }))
                 field.dispatchEvent(new Event('change', { bubbles: true }))
             }
