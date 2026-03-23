@@ -14,7 +14,8 @@ const turnstileTimeoutMs = Number.isFinite(parsedTurnstileTimeoutMs) ? parsedTur
 const parsedTurnstileSolverTimeoutMs = Number.parseInt(process.env.TURNSTILE_SOLVER_TIMEOUT_MS ?? '120000', 10) // 環境変数から読んだ solver 待機時間の生値
 const turnstileSolverTimeoutMs = Number.isFinite(parsedTurnstileSolverTimeoutMs) ? parsedTurnstileSolverTimeoutMs : 120000 // solver から token が返るまで待つ実際のタイムアウト値
 const turnstileSolverProvider = (process.env.TURNSTILE_SOLVER_PROVIDER || '2captcha').trim().toLowerCase() // 使う Turnstile solver の種別
-const defaultBrowserUserAgent = process.env.BROWSER_USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36' // 2Captcha と揃えやすい固定の送信用 User-Agent
+const configuredBrowserUserAgent = (process.env.BROWSER_USER_AGENT ?? '').trim() // 明示指定があるときだけ使う送信用 User-Agent
+const configuredBrowserPlatform = (process.env.BROWSER_PLATFORM ?? '').trim() // 必要なときだけ上書きする navigator.platform
 const turnstileSolverApiKey = (
     process.env.TURNSTILE_SOLVER_API_KEY
     ?? process.env.TWOCAPTCHA_API_KEY
@@ -923,6 +924,8 @@ const browser = await puppeteer.launch({
     args,
 }) // 自動操作に使う Chromium ブラウザ
 const [page] = await browser.pages() // 最初のタブ
+const nativeBrowserUserAgent = await browser.userAgent() // 実ブラウザが本来名乗る UA
+const effectiveBrowserUserAgent = configuredBrowserUserAgent || nativeBrowserUserAgent // 明示指定がなければ実 UA を使う
 const submitTrace = {
     request: null,
     response: null,
@@ -1050,17 +1053,21 @@ page.on('console', message => {
 page.on('pageerror', error => {
     console.log('Page error', error.message)
 })
-await page.setUserAgent(defaultBrowserUserAgent)
+await page.setUserAgent(effectiveBrowserUserAgent)
 await page.setExtraHTTPHeaders({ 'accept-language': 'ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7' })
 console.log('Browser launch configuration', {
     headless: browserHeadless,
-    userAgent: defaultBrowserUserAgent,
+    nativeUserAgent: nativeBrowserUserAgent,
+    effectiveUserAgent: effectiveBrowserUserAgent,
+    configuredPlatform: configuredBrowserPlatform || null,
 })
-await page.evaluateOnNewDocument(() => {
+await page.evaluateOnNewDocument((spoofedPlatform) => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
     Object.defineProperty(navigator, 'language', { get: () => 'ja-JP' })
     Object.defineProperty(navigator, 'languages', { get: () => ['ja-JP', 'ja', 'en-US', 'en'] })
-    Object.defineProperty(navigator, 'platform', { get: () => 'Win32' })
+    if (spoofedPlatform) {
+        Object.defineProperty(navigator, 'platform', { get: () => spoofedPlatform })
+    }
 
     // submit 時点の form data を sessionStorage に残し、遷移後にも確認できるようにする。
     const persistSubmitPayload = (form, submitter = null) => {
@@ -1167,7 +1174,7 @@ await page.evaluateOnNewDocument(() => {
             globalThis.turnstile = globalThis.turnstile
         }
     }, 50) // Turnstile 読み込み完了まで短周期で hook を試すタイマー
-})
+}, configuredBrowserPlatform)
 const recorder = await page.screencast({ path: 'recording.webm' }) // 実行中の画面録画
 
 try {
