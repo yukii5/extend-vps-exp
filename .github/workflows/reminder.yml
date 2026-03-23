@@ -13,7 +13,7 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
-      - run: yarn add puppeteer
+      - run: npm install
       - run: node reminder.mjs
         env:
           EMAIL: ${{ secrets.EMAIL }}
