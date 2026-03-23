@@ -20,6 +20,8 @@ const turnstileSolverApiKey = (
     ?? process.env.TWOCAPTCHA_API_KEY
     ?? ''
 ).trim() // solver サービスへ接続するための API キー
+const parsedHeadlessMode = (process.env.PUPPETEER_HEADLESS ?? 'true').trim().toLowerCase() // headless 実行かどうかの環境変数
+const browserHeadless = parsedHeadlessMode === 'false' ? false : true // 明示的に false を渡したときだけ headed Chrome を使う
 
 const args = ['--no-sandbox', '--disable-setuid-sandbox'] // GitHub Actions 向けの Chrome 起動オプション
 if (process.env.PROXY_SERVER) {
@@ -916,6 +918,7 @@ function logJson(label, value) {
 }
 
 const browser = await puppeteer.launch({
+    headless: browserHeadless,
     defaultViewport: { width: 1080, height: 1024 },
     args,
 }) // 自動操作に使う Chromium ブラウザ
@@ -925,7 +928,17 @@ const submitTrace = {
     response: null,
     events: [],
 } // 更新送信 request/response の観測結果
+const turnstileScriptTrace = [] // Turnstile script 本体の取得状況を残す
 page.on('request', request => {
+    if (request.url().includes('challenges.cloudflare.com/turnstile/')) {
+        turnstileScriptTrace.push({
+            type: 'request',
+            url: request.url(),
+            method: request.method(),
+            resourceType: request.resourceType(),
+        })
+    }
+
     if (!request.url().includes('/xapanel/xvps/server/freevps/extend/')) {
         return
     }
@@ -952,6 +965,33 @@ page.on('request', request => {
 })
 page.on('response', response => {
     const request = response.request()
+    if (request.url().includes('challenges.cloudflare.com/turnstile/')) {
+        Promise.resolve(response.text())
+            .then((text) => {
+                turnstileScriptTrace.push({
+                    type: 'response',
+                    url: response.url(),
+                    method: request.method(),
+                    status: response.status(),
+                    resourceType: request.resourceType(),
+                    headers: {
+                        'content-type': response.headers()['content-type'] ?? null,
+                    },
+                    bodySnippet: text.replace(/\s+/g, ' ').slice(0, 200),
+                })
+            })
+            .catch((error) => {
+                turnstileScriptTrace.push({
+                    type: 'response-read-error',
+                    url: response.url(),
+                    method: request.method(),
+                    status: response.status(),
+                    resourceType: request.resourceType(),
+                    error: String(error),
+                })
+            })
+    }
+
     if (!request.url().includes('/xapanel/xvps/server/freevps/extend/')) {
         return
     }
@@ -978,6 +1018,16 @@ page.on('response', response => {
     }
 })
 page.on('requestfailed', request => {
+    if (request.url().includes('challenges.cloudflare.com/turnstile/')) {
+        turnstileScriptTrace.push({
+            type: 'requestfailed',
+            url: request.url(),
+            method: request.method(),
+            resourceType: request.resourceType(),
+            failureText: request.failure()?.errorText ?? null,
+        })
+    }
+
     if (!request.url().includes('/xapanel/xvps/server/freevps/extend/')) {
         return
     }
@@ -1002,6 +1052,10 @@ page.on('pageerror', error => {
 })
 await page.setUserAgent(defaultBrowserUserAgent)
 await page.setExtraHTTPHeaders({ 'accept-language': 'ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7' })
+console.log('Browser launch configuration', {
+    headless: browserHeadless,
+    userAgent: defaultBrowserUserAgent,
+})
 await page.evaluateOnNewDocument(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
     Object.defineProperty(navigator, 'language', { get: () => 'ja-JP' })
@@ -1156,6 +1210,7 @@ try {
     await applyCaptchaCode(page, code.trim())
     logJson('Verification diagnostics after captcha fill', await getVerificationDiagnostics(page))
     await ensureTurnstileReady(page)
+    logJson('Turnstile script trace', turnstileScriptTrace)
     logJson('Verification diagnostics after Turnstile', await getVerificationDiagnostics(page))
     logJson('Ethna csrf state', await syncEthnaCsrf(page))
     logJson('Verification diagnostics before submit', await getVerificationDiagnostics(page))

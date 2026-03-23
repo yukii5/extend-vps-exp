@@ -14,7 +14,12 @@ jobs:
         with:
           node-version: 24
       - run: npm install --no-save puppeteer
-      - run: node reminder.mjs
+      - run: |
+          if command -v xvfb-run >/dev/null 2>&1; then
+            PUPPETEER_HEADLESS=false xvfb-run -a node reminder.mjs
+          else
+            node reminder.mjs
+          fi
         env:
           EMAIL: ${{ secrets.EMAIL }}
           PASSWORD: ${{ secrets.PASSWORD }}

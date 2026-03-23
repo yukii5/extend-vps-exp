@@ -113,6 +113,23 @@ apt-get install -y ffmpeg fonts-noto-cjk
 2. 変更を `main` に push する
 3. workflow を再実行する
 
+### Turnstile script は load するのに `hasApi: false` のままな場合
+
+Cloudflare の `api.js` script tag 自体は読めていても、headless Chrome 上では `window.turnstile` が有効化されないことがある。
+
+この repository の workflow は、`xvfb-run` が入っている runner では:
+
+```bash
+PUPPETEER_HEADLESS=false xvfb-run -a node main.mjs
+```
+
+で headed Chrome を使うようにしてある。runner サーバーへ root で `xvfb` を入れてから再実行する。
+
+```bash
+apt-get update
+apt-get install -y xvfb
+```
+
 ### 対処方針
 
 - runner が `Linux x64` なら、そのまま `self-hosted, linux, x64` で合わせる
