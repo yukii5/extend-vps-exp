@@ -49,6 +49,7 @@ async function getTurnstileState(page) {
         const renderCalls = Array.isArray(globalThis.__turnstileRenderCalls) ? globalThis.__turnstileRenderCalls : []
         const challengeScripts = Array.from(document.querySelectorAll('script[src*="challenges.cloudflare.com"]'))
             .map(script => script.src)
+        const scriptEvents = Array.isArray(globalThis.__turnstileScriptEvents) ? globalThis.__turnstileScriptEvents : []
 
         return {
             url: window.location.href,
@@ -67,6 +68,7 @@ async function getTurnstileState(page) {
             widgetIds: Array.isArray(globalThis.__turnstileWidgetIds) ? globalThis.__turnstileWidgetIds : [],
             challengeScriptCount: challengeScripts.length,
             challengeScripts,
+            scriptEvents,
         }
     }, turnstileInputSelector)
 }
@@ -326,7 +328,19 @@ async function applyTurnstileToken(page, token) {
 // ページ側が widget を自動描画できていない場合に、API script を明示的に読み込む。
 async function ensureTurnstileApi(page) {
     return page.evaluate(async () => {
+        const recordEvent = (type, detail = {}) => {
+            globalThis.__turnstileScriptEvents = [
+                ...(Array.isArray(globalThis.__turnstileScriptEvents) ? globalThis.__turnstileScriptEvents : []),
+                {
+                    type,
+                    detail,
+                    at: Date.now(),
+                },
+            ]
+        }
+
         if (globalThis.turnstile && typeof globalThis.turnstile.render === 'function') {
+            recordEvent('api-already-available')
             return { available: true, injected: false }
         }
 
@@ -337,7 +351,16 @@ async function ensureTurnstileApi(page) {
             script.async = true
             script.defer = true
             script.dataset.codexTurnstileApi = 'true'
+            script.addEventListener('load', () => {
+                recordEvent('script-load', { src: script.src })
+            })
+            script.addEventListener('error', () => {
+                recordEvent('script-error', { src: script.src })
+            })
             document.head.appendChild(script)
+            recordEvent('script-injected', { src: script.src })
+        } else {
+            recordEvent('script-already-present', { src: existing.src })
         }
 
         try {
@@ -346,11 +369,13 @@ async function ensureTurnstileApi(page) {
                 const timer = setInterval(() => {
                     if (globalThis.turnstile && typeof globalThis.turnstile.render === 'function') {
                         clearInterval(timer)
+                        recordEvent('api-became-available')
                         resolve()
                         return
                     }
                     if (Date.now() - startedAt > 10000) {
                         clearInterval(timer)
+                        recordEvent('api-timeout')
                         reject(new Error('Timed out while waiting for Turnstile API'))
                     }
                 }, 100)
@@ -643,11 +668,31 @@ async function waitForPotentialPageChange(page, previousSnapshot, timeoutMs = 10
 // 続行ボタンを通常 click し、だめなら DOM 直叩きで submit する。
 async function clickContinueButton(page, reason) {
     console.log('Clicking continue button', reason)
-    try {
-        await page.locator(`text=${continueButtonText}`).click({ timeout: 5000 })
-        return
-    } catch (error) {
-        console.log('Locator click failed, falling back to DOM submit', error.message)
+    const buttonState = await page.evaluate((text) => {
+        const globalSubmitButton = (
+            typeof globalThis.submit_button !== 'undefined'
+            && globalThis.submit_button
+        ) ? globalThis.submit_button : null
+        const matchedNode = Array.from(document.querySelectorAll('input[type="submit"], input[type="button"], button, a'))
+            .find(node => (node.textContent ?? node.value ?? '').includes(text))
+        const submitButton = globalSubmitButton ?? matchedNode ?? null
+        return {
+            hasGlobalSubmitButton: Boolean(globalSubmitButton),
+            hasMatchedNode: Boolean(matchedNode),
+            disabled: submitButton && 'disabled' in submitButton ? Boolean(submitButton.disabled) : null,
+            className: submitButton?.className ?? null,
+        }
+    }, continueButtonText)
+
+    if (buttonState.disabled === true) {
+        console.log('Skipping locator click because submit button is disabled', buttonState)
+    } else {
+        try {
+            await page.locator(`text=${continueButtonText}`).click({ timeout: 1000 })
+            return
+        } catch (error) {
+            console.log('Locator click failed, falling back to DOM submit', error.message)
+        }
     }
 
     const submitMode = await page.evaluate((text, inputSelector) => {
