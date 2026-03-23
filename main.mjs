@@ -46,6 +46,7 @@ async function getTurnstileState(page) {
         const input = document.querySelector(selector) // token を保持する hidden input
         const iframe = document.querySelector('iframe[src*="challenges.cloudflare.com"]') // 対話型 challenge が出る iframe
         const renderParams = globalThis.__turnstileRenderParams ?? {} // render hook で捕まえた sitekey などの引数
+        const renderCalls = Array.isArray(globalThis.__turnstileRenderCalls) ? globalThis.__turnstileRenderCalls : []
 
         return {
             url: window.location.href,
@@ -59,6 +60,8 @@ async function getTurnstileState(page) {
             cData: renderParams.cData ?? renderParams.cdata ?? container?.getAttribute('data-cdata') ?? null,
             chlPageData: renderParams.chlPageData ?? null,
             hasCallback: Boolean(globalThis.__turnstileCallback),
+            renderCallCount: renderCalls.length,
+            widgetIds: Array.isArray(globalThis.__turnstileWidgetIds) ? globalThis.__turnstileWidgetIds : [],
         }
     }, turnstileInputSelector)
 }
@@ -274,6 +277,18 @@ async function applyTurnstileToken(page, token) {
 
         if (typeof globalThis.__turnstileCallback === 'function') {
             globalThis.__turnstileCallback(value)
+        }
+        if (Array.isArray(globalThis.__turnstileCallbacks)) {
+            for (const callback of globalThis.__turnstileCallbacks) {
+                if (typeof callback !== 'function') {
+                    continue
+                }
+                try {
+                    callback(value)
+                } catch (error) {
+                    console.log('Turnstile callback invocation failed', String(error))
+                }
+            }
         }
     }, token)
 }
@@ -848,32 +863,61 @@ await page.evaluateOnNewDocument(() => {
     }
 
     // Turnstile の render 引数を横取りして sitekey や callback を保持する。
-    const installTurnstileHook = () => {
-        if (!globalThis.turnstile || typeof globalThis.turnstile.render !== 'function' || globalThis.turnstile.__codexHookInstalled) {
-            return false
+    const wrapTurnstileApi = (api) => {
+        if (!api || typeof api.render !== 'function' || api.__codexHookInstalled) {
+            return api
         }
 
-        const originalRender = globalThis.turnstile.render.bind(globalThis.turnstile) // 元の render 実装
-        globalThis.turnstile.render = (container, params = {}) => {
-            globalThis.__turnstileRenderParams = {
+        const originalRender = api.render.bind(api) // 元の render 実装
+        api.render = (container, params = {}) => {
+            const captured = {
                 sitekey: params.sitekey ?? null,
                 action: params.action ?? null,
                 cData: params.cData ?? params.cdata ?? null,
                 chlPageData: params.chlPageData ?? null,
             }
+            globalThis.__turnstileRenderParams = captured
+            globalThis.__turnstileRenderCalls = [
+                ...(Array.isArray(globalThis.__turnstileRenderCalls) ? globalThis.__turnstileRenderCalls : []),
+                captured,
+            ]
             if (typeof params.callback === 'function') {
                 globalThis.__turnstileCallback = params.callback
+                globalThis.__turnstileCallbacks = [
+                    ...(Array.isArray(globalThis.__turnstileCallbacks) ? globalThis.__turnstileCallbacks : []),
+                    params.callback,
+                ]
             }
-            return originalRender(container, params)
+            const widgetId = originalRender(container, params)
+            globalThis.__turnstileWidgetIds = [
+                ...(Array.isArray(globalThis.__turnstileWidgetIds) ? globalThis.__turnstileWidgetIds : []),
+                widgetId,
+            ]
+            return widgetId
         }
-        globalThis.turnstile.__codexHookInstalled = true
-        return true
+        api.__codexHookInstalled = true
+        return api
     }
 
-    installTurnstileHook()
+    let turnstileApi = undefined
+    Object.defineProperty(globalThis, 'turnstile', {
+        configurable: true,
+        enumerable: true,
+        get() {
+            return turnstileApi
+        },
+        set(value) {
+            turnstileApi = wrapTurnstileApi(value)
+        },
+    })
+
+    if (globalThis.turnstile) {
+        globalThis.turnstile = globalThis.turnstile
+    }
+
     const hookTimer = setInterval(() => {
-        if (installTurnstileHook()) {
-            clearInterval(hookTimer)
+        if (globalThis.turnstile) {
+            globalThis.turnstile = globalThis.turnstile
         }
     }, 50) // Turnstile 読み込み完了まで短周期で hook を試すタイマー
 })
