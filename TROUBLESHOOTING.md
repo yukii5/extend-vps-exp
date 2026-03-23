@@ -95,11 +95,23 @@ apt-get install -y ffmpeg fonts-noto-cjk
 
 対処:
 
-1. workflow の install step を `npm install` へ変更する
+1. workflow の install step を `npm install --no-save puppeteer` へ変更する
 2. 変更を `main` に push する
 3. runner を待機させたまま workflow を再実行する
 
-この repository の self-hosted runner 用 workflow は、2026-03-24 時点で `npm install` を使うように変更してある。
+この repository の self-hosted runner 用 workflow は、2026-03-24 時点で `npm install --no-save puppeteer` を使うように変更してある。
+
+### job 実行中に `Could not read package.json` で落ちる場合
+
+原因は、repository に `package.json` が commit されておらず、runner 上の checkout 後には存在しないため。
+
+この repository では `package.json` と `yarn.lock` が `.gitignore` に入っているため、workflow では `npm install` ではなく、依存を直接入れる必要がある。
+
+対処:
+
+1. workflow の install step を `npm install --no-save puppeteer` にする
+2. 変更を `main` に push する
+3. workflow を再実行する
 
 ### 対処方針
 
