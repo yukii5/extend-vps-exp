@@ -2,7 +2,7 @@
 
 このドキュメントは、`main.mjs` を GitHub Actions 上およびローカル実行したときに確認できた問題点をまとめたものです。
 
-最終更新日: 2026-03-22
+最終更新日: 2026-03-24
 
 ## 現在の状況
 
@@ -12,6 +12,90 @@
 - Cloudflare Turnstile 用 token も 2Captcha から取得し、hidden field へ注入できている
 - GitHub-hosted runner では `POST /xapanel/xvps/server/freevps/extend/do` まで到達するが、`認証に失敗しました。` になる
 - ローカル実行では同じ処理で `302 -> /xapanel/xvps/index` となり成功する
+
+## GitHub Actions が `Waiting for a runner to pick up this job...` で止まる場合
+
+2026-03-24 時点の workflow はどちらも以下の runner を要求している。
+
+- `runs-on: [self-hosted, linux, x64]`
+- 対象: [`.github/workflows/main.yml`](/Users/ikedayuuki/Applications/new_project/extend-vps-exp/.github/workflows/main.yml)
+- 対象: [`.github/workflows/reminder.yml`](/Users/ikedayuuki/Applications/new_project/extend-vps-exp/.github/workflows/reminder.yml)
+
+この表示で止まる場合、`main.mjs` や `reminder.mjs` の不具合ではなく、GitHub 側が条件に合う self-hosted runner をまだ見つけられていない。
+
+### まず確認すること
+
+1. GitHub の `Settings > Actions > Runners` で runner が `Online` になっているか
+2. その runner がこの repository に紐付いているか
+3. runner の label に `self-hosted` `linux` `x64` が含まれているか
+4. runner を `--no-default-labels` で登録していないか
+5. runner の実機が `Linux x64` か
+
+### よくある原因
+
+- runner が停止中で `Offline`
+- runner を org/repo の別スコープに登録しており、この repository から見えていない
+- runner が `ARM64` なのに workflow が `x64` を要求している
+- runner が `Windows` または `macOS` なのに workflow が `linux` を要求している
+- custom label だけで登録しており、デフォルト label が付いていない
+- self-hosted runner 用ユーザーに password がなく、workflow 内の `sudo` で止まる
+
+### サーバー側での確認例
+
+`config.sh` と `run.sh` は `root` ではなく、専用の一般ユーザーで実行する。  
+`/root/actions-runner` 配下に置くと一般ユーザーが扱いにくいので、例えば `/home/github-runner/actions-runner` を使う。
+
+例:
+
+```bash
+adduser --disabled-password --gecos "" github-runner
+su - github-runner
+mkdir -p ~/actions-runner
+cd ~/actions-runner
+```
+
+設定後の起動確認:
+
+```bash
+cd ~/actions-runner
+./run.sh
+```
+
+service 化している場合:
+
+```bash
+cd /home/github-runner/actions-runner
+sudo ./svc.sh install github-runner
+sudo ./svc.sh start
+sudo ./svc.sh status
+```
+
+### job 実行中に `[sudo] password for github-runner:` で止まる場合
+
+原因は、runner を動かしている `github-runner` ユーザーに password がないのに、workflow が `sudo apt-get ...` を実行しているため。
+
+対処:
+
+1. いったんその workflow run を中止する
+2. サーバーに root で必要パッケージを先に入れる
+3. workflow から `Install system packages` step を外す
+
+例:
+
+```bash
+apt-get update
+apt-get install -y ffmpeg fonts-noto-cjk
+```
+
+この repository の self-hosted runner 用 workflow は、2026-03-24 時点で `sudo apt-get` step を削除してある。
+
+### 対処方針
+
+- runner が `Linux x64` なら、そのまま `self-hosted, linux, x64` で合わせる
+- runner が `ARM64` なら workflow 側を `runs-on: [self-hosted, linux, ARM64]` のように実機へ合わせる
+- label がずれているなら runner を再登録する
+
+この待機状態を解消して、job が実際に起動してから初めて、下の「GitHub-hosted runner での認証失敗」の切り分けに進める。
 
 ## 実行環境ごとの差
 

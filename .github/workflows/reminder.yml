@@ -13,10 +13,6 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
-      - name: Install system packages
-        run: |
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Use-Pty=0 -o Dpkg::Progress-Fancy=0 -o APT::Color=0 -qq update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Use-Pty=0 -o Dpkg::Progress-Fancy=0 -o APT::Color=0 -yqq install --no-install-recommends ffmpeg fonts-noto-cjk
       - run: yarn add puppeteer
       - run: node reminder.mjs
         env:
