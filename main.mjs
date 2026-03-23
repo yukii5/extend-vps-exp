@@ -47,6 +47,8 @@ async function getTurnstileState(page) {
         const iframe = document.querySelector('iframe[src*="challenges.cloudflare.com"]') // 対話型 challenge が出る iframe
         const renderParams = globalThis.__turnstileRenderParams ?? {} // render hook で捕まえた sitekey などの引数
         const renderCalls = Array.isArray(globalThis.__turnstileRenderCalls) ? globalThis.__turnstileRenderCalls : []
+        const challengeScripts = Array.from(document.querySelectorAll('script[src*="challenges.cloudflare.com"]'))
+            .map(script => script.src)
 
         return {
             url: window.location.href,
@@ -54,6 +56,7 @@ async function getTurnstileState(page) {
             hasContainer: Boolean(container),
             hasIframe: Boolean(iframe),
             hasInput: Boolean(input),
+            hasApi: Boolean(globalThis.turnstile && typeof globalThis.turnstile.render === 'function'),
             tokenLength: input?.value?.length ?? 0,
             sitekey: renderParams.sitekey ?? container?.getAttribute('data-sitekey') ?? null,
             action: renderParams.action ?? container?.getAttribute('data-action') ?? null,
@@ -62,6 +65,8 @@ async function getTurnstileState(page) {
             hasCallback: Boolean(globalThis.__turnstileCallback),
             renderCallCount: renderCalls.length,
             widgetIds: Array.isArray(globalThis.__turnstileWidgetIds) ? globalThis.__turnstileWidgetIds : [],
+            challengeScriptCount: challengeScripts.length,
+            challengeScripts,
         }
     }, turnstileInputSelector)
 }
@@ -131,24 +136,49 @@ async function clickTurnstileWidget(page) {
 
 // solver API との JSON 通信を共通化し、失敗時はレスポンスも含めて落とす。
 async function requestJson(url, body) {
-    const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-    }) // solver API への HTTP レスポンス
-    const text = await response.text() // JSON 化前の生レスポンス
-    let data
-    try {
-        data = JSON.parse(text)
-    } catch {
-        throw new Error(`Unexpected JSON response from ${url}: ${text.slice(0, 200)}`)
+    let lastError = null
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+        }) // solver API への HTTP レスポンス
+        const text = await response.text() // JSON 化前の生レスポンス
+        let data
+        try {
+            data = JSON.parse(text)
+        } catch {
+            lastError = new Error(`Unexpected JSON response from ${url}: ${text.slice(0, 200)}`)
+            if (response.status >= 500 && attempt < 3) {
+                console.log('Retrying solver request after non-JSON server response', {
+                    url,
+                    attempt,
+                    status: response.status,
+                })
+                await setTimeout(2000 * attempt)
+                continue
+            }
+            throw lastError
+        }
+
+        if (!response.ok) {
+            lastError = new Error(`Request to ${url} failed with ${response.status}: ${text.slice(0, 200)}`)
+            if (response.status >= 500 && attempt < 3) {
+                console.log('Retrying solver request after server error', {
+                    url,
+                    attempt,
+                    status: response.status,
+                })
+                await setTimeout(2000 * attempt)
+                continue
+            }
+            throw lastError
+        }
+
+        return data
     }
 
-    if (!response.ok) {
-        throw new Error(`Request to ${url} failed with ${response.status}: ${text.slice(0, 200)}`)
-    }
-
-    return data
+    throw lastError ?? new Error(`Request to ${url} failed after retries`)
 }
 
 // 2Captcha に渡す Turnstile task を、必要なら proxy 情報付きで組み立てる。
@@ -293,6 +323,117 @@ async function applyTurnstileToken(page, token) {
     }, token)
 }
 
+// ページ側が widget を自動描画できていない場合に、API script を明示的に読み込む。
+async function ensureTurnstileApi(page) {
+    return page.evaluate(async () => {
+        if (globalThis.turnstile && typeof globalThis.turnstile.render === 'function') {
+            return { available: true, injected: false }
+        }
+
+        const existing = document.querySelector('script[data-codex-turnstile-api]')
+        if (!existing) {
+            const script = document.createElement('script')
+            script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'
+            script.async = true
+            script.defer = true
+            script.dataset.codexTurnstileApi = 'true'
+            document.head.appendChild(script)
+        }
+
+        try {
+            await new Promise((resolve, reject) => {
+                const startedAt = Date.now()
+                const timer = setInterval(() => {
+                    if (globalThis.turnstile && typeof globalThis.turnstile.render === 'function') {
+                        clearInterval(timer)
+                        resolve()
+                        return
+                    }
+                    if (Date.now() - startedAt > 10000) {
+                        clearInterval(timer)
+                        reject(new Error('Timed out while waiting for Turnstile API'))
+                    }
+                }, 100)
+            })
+            return { available: true, injected: true }
+        } catch (error) {
+            return {
+                available: false,
+                injected: true,
+                error: String(error),
+            }
+        }
+    })
+}
+
+// 自動描画されない widget を明示 render して iframe/callback を作らせる。
+async function forceRenderTurnstile(page) {
+    return page.evaluate(() => {
+        const api = globalThis.turnstile
+        const container = document.querySelector('.cf-turnstile')
+        if (!container) {
+            return { ok: false, reason: 'missing-container' }
+        }
+        if (!api || typeof api.render !== 'function') {
+            return { ok: false, reason: 'missing-api' }
+        }
+        if (container.querySelector('iframe[src*="challenges.cloudflare.com"]')) {
+            return { ok: true, reason: 'iframe-already-present' }
+        }
+
+        const sitekey = container.getAttribute('data-sitekey') || globalThis.__turnstileRenderParams?.sitekey || null
+        if (!sitekey) {
+            return { ok: false, reason: 'missing-sitekey' }
+        }
+
+        const setToken = (value) => {
+            const fields = Array.from(document.querySelectorAll('[name="cf-turnstile-response"], [name="cf_challenge_response"], [name="g-recaptcha-response"]'))
+            for (const field of fields) {
+                field.value = value
+                if ('defaultValue' in field) {
+                    field.defaultValue = value
+                }
+                field.setAttribute?.('value', value)
+                field.dispatchEvent(new Event('input', { bubbles: true }))
+                field.dispatchEvent(new Event('change', { bubbles: true }))
+            }
+        }
+
+        try {
+            container.innerHTML = ''
+            const widgetId = api.render(container, {
+                sitekey,
+                action: container.getAttribute('data-action') || undefined,
+                cData: container.getAttribute('data-cdata') || undefined,
+                callback: (value) => {
+                    setToken(value)
+                    globalThis.__turnstileManualCallbackValue = value
+                },
+                'expired-callback': () => {
+                    globalThis.__turnstileManualExpired = true
+                },
+                'error-callback': (code) => {
+                    globalThis.__turnstileManualError = code ?? true
+                },
+            })
+            return {
+                ok: true,
+                reason: 'render-called',
+                widgetId,
+                sitekey,
+                action: container.getAttribute('data-action') || null,
+                cData: container.getAttribute('data-cdata') || null,
+            }
+        } catch (error) {
+            return {
+                ok: false,
+                reason: 'render-threw',
+                error: String(error),
+            }
+        }
+    })
+}
+
 // Turnstile を自動待機、クリック、solver の順で解決する。
 async function ensureTurnstileReady(page) {
     const state = await getTurnstileState(page) // 現在の Turnstile 状態
@@ -312,6 +453,13 @@ async function ensureTurnstileReady(page) {
         return
     } catch (error) {
         console.log('Turnstile token was not generated automatically', error.message)
+    }
+
+    if (!state.hasIframe) {
+        console.log('Turnstile API ensure result', await ensureTurnstileApi(page))
+        console.log('Turnstile manual render result', await forceRenderTurnstile(page))
+        await setTimeout(1000)
+        console.log('Turnstile state after manual render attempt', await getTurnstileState(page))
     }
 
     if (await clickTurnstileWidget(page)) {
